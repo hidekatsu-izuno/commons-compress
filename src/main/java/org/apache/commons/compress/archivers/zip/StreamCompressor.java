@@ -60,6 +60,11 @@ public abstract class StreamCompressor implements Closeable {
     private final byte[] outputBuffer = new byte[BUFFER_SIZE];
     private final byte[] readerBuf = new byte[BUFFER_SIZE];
 
+    private boolean isEncrypting = false;
+    private String password;
+    private ZipEncryptionAlgorithm encryptionAlgorithm;
+    private Encrypter encrypter;
+
     StreamCompressor(final Deflater deflater) {
         this.def = deflater;
     }
@@ -167,6 +172,40 @@ public abstract class StreamCompressor implements Closeable {
         return totalWrittenToOutputStream;
     }
 
+    public void startEncrypt(String password, ZipEncryptionAlgorithm encryptionAlgorithm,
+                             ZipArchiveEntry entry) throws IOException {
+        if (password == null) {
+            isEncrypting = false;
+            return;
+        }
+
+        if (encrypter == null
+            || encryptionAlgorithm != this.encryptionAlgorithm
+            || !password.equals(this.password)) {
+            encrypter = Encrypter.createEncrypter(encryptionAlgorithm, password);
+            this.encryptionAlgorithm = encryptionAlgorithm;
+            this.password = password;
+        } else {
+            encrypter.reset();
+        }
+
+        byte[] header = encrypter.header(entry);
+        if (header != null) {
+            writeCounted(header);
+        }
+
+        isEncrypting = true;
+    }
+
+    public void endEncrypt() throws IOException {
+        if (isEncrypting) {
+            byte[] footer = encrypter.footer();
+            if (footer != null) {
+                writeCounted(footer);
+            }
+            isEncrypting = false;
+        }
+    }
 
     /**
      * Deflate the given source using the supplied compression method
@@ -270,6 +309,9 @@ public abstract class StreamCompressor implements Closeable {
     }
 
     public void writeCounted(final byte[] data, final int offset, final int length) throws IOException {
+        if (isEncrypting) {
+            encrypter.encrypt(data, offset, length);
+        }
         writeOut(data, offset, length);
         writtenToOutputStreamForLastEntry += length;
         totalWrittenToOutputStream += length;

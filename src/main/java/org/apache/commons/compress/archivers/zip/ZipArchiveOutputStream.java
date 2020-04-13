@@ -266,6 +266,20 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
     private UnicodeExtraFieldPolicy createUnicodeExtraFields = UnicodeExtraFieldPolicy.NEVER;
 
     /**
+     * Whether to encrypt file contents.
+     */
+    private boolean useEncryptionFlag = false;
+
+    /**
+     * Password string when contents encrypted
+     */
+    private String password;
+
+    private ZipEncryptionAlgorithm encryptionAlgorithm = ZipEncryptionAlgorithm.STANDARD;
+
+    private boolean needsDataDescriptor;
+
+    /**
      * Whether anything inside this archive has used a ZIP64 feature.
      *
      * @since 1.3
@@ -390,6 +404,42 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
      */
     public boolean isSeekable() {
         return channel != null;
+    }
+    
+    public void setPassword(String password) {
+        if (password != null) {
+            if (password.isEmpty()) {
+                throw new IllegalArgumentException("password must be at least one character");
+            }
+    
+            for (int i = 0; i < password.length(); i++) {
+                char c = password.charAt(i);
+                if (c < ' ' || c > '~') {
+                    throw new IllegalArgumentException("password must be ascii char sequence");
+                }
+            }
+        }
+
+        if ((password == null && this.password != null) || 
+            (password != null && !password.equals(this.password))) {
+            this.password = password;
+            this.useEncryptionFlag = password != null;
+        }
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setEncryptionAlgorithm(ZipEncryptionAlgorithm encryptionAlgorithm) {
+        if (encryptionAlgorithm == null) {
+            encryptionAlgorithm = ZipEncryptionAlgorithm.STANDARD;
+        }
+        this.encryptionAlgorithm = encryptionAlgorithm;
+    }
+
+    public ZipEncryptionAlgorithm getEncryptionAlgorithm() {
+        return encryptionAlgorithm;
     }
 
     /**
@@ -587,12 +637,15 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
 
         flushDeflater();
 
+        streamCompressor.endEncrypt();
+
         final long bytesWritten = streamCompressor.getTotalBytesWritten() - entry.dataStart;
         final long realCrc = streamCompressor.getCrc32();
         entry.bytesRead = streamCompressor.getBytesRead();
         final Zip64Mode effectiveMode = getEffectiveZip64Mode(entry.entry);
         final boolean actuallyNeedsZip64 = handleSizesAndCrc(bytesWritten, realCrc, effectiveMode);
         closeEntry(actuallyNeedsZip64, false);
+        needsDataDescriptor = false;
         streamCompressor.reset();
     }
 
@@ -713,7 +766,7 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
                                        + bytesWritten);
             }
         } else { /* method is STORED and we used SeekableByteChannel */
-            entry.entry.setSize(bytesWritten);
+            entry.entry.setSize(entry.bytesRead);
             entry.entry.setCompressedSize(bytesWritten);
             entry.entry.setCrc(crc);
         }
@@ -864,7 +917,16 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
             def.setLevel(level);
             hasCompressionLevelChanged = false;
         }
+        
+        if (password != null
+            && encryptionAlgorithm == ZipEncryptionAlgorithm.STANDARD
+            && entry.entry.getCrc() == -1) {
+            needsDataDescriptor = true;
+        }
+
         writeLocalFileHeader((ZipArchiveEntry) archiveEntry, phased);
+
+        streamCompressor.startEncrypt(password, encryptionAlgorithm, entry.entry);
     }
 
     /**
@@ -1711,6 +1773,7 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
 
     private GeneralPurposeBit getGeneralPurposeBits(final boolean utfFallback, boolean usesDataDescriptor) {
         final GeneralPurposeBit b = new GeneralPurposeBit();
+        b.useEncryption(useEncryptionFlag);
         b.useUTF8ForNames(useUTF8Flag || utfFallback);
         if (usesDataDescriptor) {
             b.useDataDescriptor(true);
@@ -1729,7 +1792,7 @@ public class ZipArchiveOutputStream extends ArchiveOutputStream {
     }
 
     private boolean usesDataDescriptor(final int zipMethod, boolean phased) {
-        return !phased && zipMethod == DEFLATED && channel == null;
+        return (!phased && zipMethod == DEFLATED && channel == null) || needsDataDescriptor;
     }
 
     private int versionNeededToExtractMethod(int zipMethod) {
